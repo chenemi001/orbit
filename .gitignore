@@ -32,9 +32,6 @@
 *.tsbuildinfo
 next-env.d.ts
 
-# Drizzle
-/drizzle/meta/
-/drizzle/*.sql
 
 # Debug
 npm-debug.log*

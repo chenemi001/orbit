@@ -112,7 +112,7 @@ files in `drizzle/` are generated history, applied with `db:push`.
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 20.9.0+ (Next.js 16's minimum)
 - A PostgreSQL database (this project was built against Supabase, but any
   Postgres instance works)
 
@@ -164,6 +164,64 @@ npm run db:studio    # browse the database in Drizzle Studio
 Integration tests (`tests/integration/`) run against the database in
 `DATABASE_URL` — they create their own users/projects and delete them in an
 `afterAll`, but point this at a dev database, not production.
+
+## Deploying to Vercel
+
+Orbit is a standard Next.js App Router project — `vercel deploy` (or
+connecting the repo in the Vercel dashboard) detects it with no extra
+config. Two things matter beyond that:
+
+### 1. Use Supabase's transaction pooler, not a direct connection
+
+Vercel runs your API routes as serverless functions, and under load many
+instances can exist at once. Each one imports `lib/db/index.ts` and opens
+its own database connection — a direct Postgres connection (or Supabase's
+*session* pooler on port `5432`) has a low, fixed connection limit and will
+get exhausted quickly.
+
+In the Supabase dashboard, go to **Project Settings → Database →
+Connection string** and copy the **Transaction pooler** string (port
+`6543`), not the direct or session-pooler one. `lib/db/index.ts` already
+sets `prepare: false` and `max: 1`, which is exactly what that pooler
+mode requires — one small connection per function instance, multiplexed by
+the pooler itself rather than by this app.
+
+### 2. Set environment variables in the Vercel project
+
+**Project Settings → Environment Variables** (set for Production, and
+again for Preview if you want preview deployments to have a working
+database):
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | The transaction-pooler connection string above |
+| `SESSION_SECRET` | A long random string (`openssl rand -base64 32`) — **required**, the app throws on every request if it's missing |
+| `OPENAI_API_KEY` | Optional — omit it and the AI assistant just reports itself as unconfigured |
+
+None of these should ever get a `NEXT_PUBLIC_` prefix — that would ship
+them to the browser.
+
+### 3. Apply the schema before (or right after) the first deploy
+
+Vercel's build step only runs `next build` — it does not run any Drizzle
+command, so a fresh database needs its schema applied once, from your own
+machine, pointed at production:
+
+```bash
+DATABASE_URL="<your transaction-pooler URL>" npm run db:push
+```
+
+Do this before the first deploy, and again after any future schema change
+in `lib/db/schema.ts`. Treat it as a deliberate, manual step — nothing in
+the deploy pipeline applies schema changes automatically, by design (a
+migration should never run implicitly on every push).
+
+### 4. Route protection needs the Node.js runtime
+
+`proxy.ts` (Next's middleware convention) verifies the session cookie with
+Node's `crypto` module, so it must run on the Node.js runtime rather than
+the Edge runtime. This is Next 16's default for the `proxy` file — no
+`runtime` config is needed (or allowed) — and Vercel supports it natively.
 
 ## Security notes
 
