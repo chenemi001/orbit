@@ -1,36 +1,193 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Orbit
 
-## Getting Started
+Orbit is a full-stack project management workspace: projects, tasks, team
+collaboration, activity tracking, notifications, analytics, and an
+AI assistant that understands your actual workspace data — built with
+Next.js, TypeScript, Drizzle ORM, and PostgreSQL.
 
-First, run the development server:
+## Features
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+- **Authentication** — email/password registration and login, scrypt
+  password hashing, signed HTTP-only session cookies, route protection via
+  a Next.js proxy (middleware).
+- **Projects** — create, edit, archive; role-based membership
+  (owner/admin/member/viewer); progress computed from real task completion,
+  not a manually-set number.
+- **Tasks** — kanban board and table views, filtering/search, assignment,
+  priority and status changes, due dates — all backed by the database.
+- **Team** — everyone you share a project with, aggregated with task and
+  project counts; invite existing users into a project by email.
+- **Notifications** — task assignments, completions, and project updates,
+  with unread counts and mark-as-read.
+- **Activity feed** — an audit trail of what happened across your projects.
+- **Analytics** — completion rate, priority/status distribution, overdue
+  tasks, and a 14-day activity chart, computed from live data.
+- **AI assistant** — a per-user conversation history backed by
+  `ai_conversations` / `ai_messages`, with your real tasks and projects
+  injected as context so it can answer "what should I work on today?"
+  Degrades to a clear "not configured" message (never a fake response) when
+  no `OPENAI_API_KEY` is set.
+- **Search** — a command palette (⌘K / Ctrl+K) searching tasks, projects,
+  and people you have access to.
+
+## Tech stack
+
+| Layer | Choice |
+|---|---|
+| Framework | Next.js 16 (App Router, Turbopack) |
+| UI | React 19, TypeScript, Tailwind CSS 4 |
+| State | Zustand (client UI state only — server state is fetched, not cached client-side) |
+| Database | PostgreSQL (Supabase-hosted), via `postgres.js` |
+| ORM | Drizzle ORM (schema + relational queries) |
+| Auth | Hand-rolled: scrypt hashing + HMAC-signed session cookies |
+| Validation | Zod |
+| Testing | Vitest (unit + integration) |
+
+## Architecture
+
+```text
+app/
+  (app)/              route group for every authenticated page — one
+                       shared layout resolves the session server-side and
+                       redirects to /login if it's missing
+    dashboard/ tasks/ projects/ projects/[id]/ team/
+    notifications/ analytics/ profile/ settings/ ai/
+  api/                 route handlers: request → validate → service → response
+  login/ register/     public auth pages
+  page.tsx             marketing landing page
+
+components/
+  ui/                  design-system primitives (Button, Modal, Avatar, …)
+  layout/              Sidebar, mobile nav, command palette
+  dashboard/ tasks/ projects/ team/ notifications/ analytics/ ai/ shared/
+
+lib/
+  db/                  Drizzle schema, relations, typed client
+  services/            all database access — the only layer that queries the DB
+  auth/                session signing/verification, rate limiting
+  permissions/         role → permission map + project-scoped guards
+  validation/          Zod schemas per entity
+  api/                 response envelope, typed errors, request parsing
+  ai/                  OpenAI client, prompts, workspace-context builder
+
+proxy.ts               route protection (Next.js 16's middleware convention)
+drizzle/                generated SQL migrations
+tests/unit/             pure-logic tests (hashing, validation, permissions)
+tests/integration/      tests against the real database (own setup/teardown)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+**Request flow.** A route handler in `app/api/**` authenticates
+(`requireUser()`), validates the body against a Zod schema, checks
+authorization for the target project (`requireProjectPermission`), calls a
+function in `lib/services/*`, and returns a consistent envelope via
+`lib/api/response.ts`. Services are the only code that imports `lib/db` —
+nothing else touches the database directly.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+**Authorization model.** Every project always has a membership row for its
+owner (created atomically with the project). A user's role on a project —
+`owner` / `admin` / `member` / `viewer` — is resolved once per request via
+`getUserProjectRole`, and `lib/permissions` maps that role to a fixed set of
+permission strings (`task:create`, `project:delete`, …). A non-member gets
+a 404 on that project, not a 403 — so a private project's existence isn't
+leaked to people who aren't in it.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+**Progress isn't stored opinion.** `projects.progress` is recalculated from
+actual task completion (`recalculateProjectProgress`) every time a task is
+created, completed, or deleted — never set by hand.
 
-## Learn More
+## Database
 
-To learn more about Next.js, take a look at the following resources:
+8 tables: `users`, `projects`, `project_members`, `tasks`, `notifications`,
+`activities`, `ai_conversations`, `ai_messages`. Enums for project status,
+task status/priority, notification type, and member role. Foreign keys on
+every relationship, indexes on the columns that get filtered on
+(`tasks.project_id`, `notifications(user_id, read)`, etc.), and a unique
+constraint on `(project_id, user_id)` in `project_members`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Schema lives in `lib/db/schema.ts`; relations (for Drizzle's relational
+query API) in `lib/db/relations.ts`. Both are the source of truth — the
+files in `drizzle/` are generated history, applied with `db:push`.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Getting started
 
-## Deploy on Vercel
+### Prerequisites
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- Node.js 20+
+- A PostgreSQL database (this project was built against Supabase, but any
+  Postgres instance works)
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### Environment variables
+
+Create `.env.local`:
+
+```bash
+DATABASE_URL=postgresql://user:password@host:5432/dbname
+SESSION_SECRET=<a long random string — used to sign session cookies>
+
+# Optional — without it, the AI assistant returns a clear
+# "not configured" message instead of a fake response.
+OPENAI_API_KEY=sk-...
+```
+
+`SESSION_SECRET` and `DATABASE_URL` are server-only — never reference them
+with a `NEXT_PUBLIC_` prefix. If you're pointing at Supabase, its
+`NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` are safe
+to expose (that's what "publishable" means) but aren't required by this
+app's own code — only `DATABASE_URL` is read for data access.
+
+### Install and run
+
+```bash
+npm install
+npm run db:push     # applies lib/db/schema.ts to your database
+npm run dev
+```
+
+Visit `http://localhost:3000`, register an account, and you're in.
+
+### Commands
+
+```bash
+npm run dev          # start the dev server
+npm run build        # production build
+npm run start        # run the production build
+npm run typecheck    # tsc --noEmit
+npm run lint         # eslint
+npm test             # vitest (unit + integration, run once)
+npm run test:watch   # vitest in watch mode
+
+npm run db:generate  # generate a SQL migration from schema.ts
+npm run db:push      # push schema.ts directly to the database
+npm run db:studio    # browse the database in Drizzle Studio
+```
+
+Integration tests (`tests/integration/`) run against the database in
+`DATABASE_URL` — they create their own users/projects and delete them in an
+`afterAll`, but point this at a dev database, not production.
+
+## Security notes
+
+- Passwords are hashed with scrypt (random salt, timing-safe comparison) —
+  never stored or logged in plaintext.
+- Sessions are HMAC-SHA256-signed, httpOnly, `sameSite=lax` cookies with a
+  server-side expiry check independent of the cookie's own `maxAge`.
+- Every mutating API route re-derives the user's permission on the target
+  resource server-side — client-supplied IDs are never trusted for
+  authorization.
+- Login and registration are rate-limited per IP (in-memory — fine for a
+  single instance; a multi-instance deployment should back this with Redis
+  instead).
+- Zod validates every request body; unrecognized fields are stripped, not
+  mass-assigned.
+- No `dangerouslySetInnerHTML` anywhere; React's default escaping is relied
+  on for all user-generated content.
+
+## What's intentionally not here
+
+- Real-time sync across browser tabs/users (no websockets) — the client
+  refetches after each mutation instead.
+- Email delivery — "inviting" someone adds an existing Orbit account to a
+  project; there's no email-based signup invite flow.
+- Multi-tenant "workspaces" as a distinct entity — a user's accessible
+  projects and teammates are derived from project membership rather than a
+  separate organization table.
